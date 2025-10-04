@@ -3,11 +3,7 @@ import argparse
 import numpy as np
 import random
 import sys
-import time
 from tqdm import tqdm
-import ipdb
-import pickle
-
 import torch
 import torch.nn as nn
 
@@ -18,184 +14,185 @@ from Opts.builder import get_opts
 from Losses.builder import get_losses
 from Validations.builder import get_validations
 
-from Utils.basic_utils import AverageMeter, BigFile, read_dict, log_config
+from Utils.basic_utils import AverageMeter
 from Utils.utils import set_seed, set_log, gpu, save_ckpt, load_ckpt
 
 
-root_path = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, root_path)
+# ==========================================================
+# 📂 Đường dẫn checkpoint (sẽ lưu 1 file duy nhất)
+CHECKPOINT_PATH = "/content/drive/MyDrive/AIC2025/UEM/checkpoints/uem_latest.pt"
+os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
+# ==========================================================
+
 
 parser = argparse.ArgumentParser(description="Uneven Event Modeling")
 
 parser.add_argument(
-    '-d', '--dataset_name', default='act', type=str, metavar='DATASET', help='dataset name',
-    choices=['tvr', 'act']
+    "-d", "--dataset_name", default="act", type=str, metavar="DATASET",
+    help="dataset name", choices=["tvr", "act"]
 )
-parser.add_argument(
-    '--gpu', default = '1', type = str, help = 'specify gpu device'
-    )
-parser.add_argument('--eval', action='store_true')
-parser.add_argument('--resume', default='', type=str)
+parser.add_argument("--gpu", default="1", type=str, help="specify gpu device")
+parser.add_argument("--eval", action="store_true")
 args = parser.parse_args()
 
 
-def train_one_epoch(epoch, train_loader, model, criterion, cfg, optimizer,device):
-
-    if epoch >= cfg['hard_negative_start_epoch']:
-        criterion.cfg['use_hard_negative'] = True
+# ==========================================================
+def train_one_epoch(epoch, train_loader, model, criterion, cfg, optimizer, device):
+    """
+    Train 1 epoch, auto-save checkpoint duy nhất mỗi 100 batch
+    """
+    if epoch >= cfg["hard_negative_start_epoch"]:
+        criterion.cfg["use_hard_negative"] = True
     else:
-        criterion.cfg['use_hard_negative'] = False
+        criterion.cfg["use_hard_negative"] = False
 
     loss_meter = AverageMeter()
-
     model.train()
 
-    train_bar = tqdm(train_loader, desc="epoch " + str(epoch), total=len(train_loader),
-                    unit="batch", dynamic_ncols=True)
+    train_bar = tqdm(train_loader, desc=f"epoch {epoch}", total=len(train_loader),
+                     unit="batch", dynamic_ncols=True)
 
     for idx, batch in enumerate(train_bar):
-
-        batch = gpu(batch,device=device)
+        batch = gpu(batch, device=device)
 
         optimizer.zero_grad()
-
         input_list = model(batch)
-
         loss = criterion(input_list, batch)
-        
+
         loss.backward()
         optimizer.step()
-
         loss_meter.update(loss.cpu().item())
 
-        train_bar.set_description('exp: {} epoch:{:2d} iter:{:3d} loss:{:.4f}'.format(cfg['model_name'], epoch, idx, loss))
+        train_bar.set_description(
+            f"exp: {cfg['model_name']} epoch:{epoch:2d} iter:{idx:3d} loss:{loss:.4f}"
+        )
+
+        # 💾 Lưu duy nhất 1 file, ghi đè mỗi 100 batch
+        if idx % 100 == 0:
+            checkpoint = {
+                "epoch": epoch,
+                "batch": idx,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "loss": loss.item(),
+                "config": cfg,
+            }
+            torch.save(checkpoint, CHECKPOINT_PATH)
+            print(f"💾 Saved latest checkpoint: {CHECKPOINT_PATH}")
 
     return loss_meter.avg
 
 
-def val_one_epoch(epoch, context_dataloader, query_eval_loader, model, val_criterion, cfg, optimizer, best_val, loss_meter, logger):
+# ==========================================================
+def val_one_epoch(epoch, context_dataloader, query_eval_loader,
+                  model, val_criterion, cfg, optimizer, best_val, loss_meter, logger):
 
     val_meter = val_criterion(model, context_dataloader, query_eval_loader)
 
     if val_meter[4] > best_val[4]:
         es = False
-        sc = 'New Best Model !!!'
+        sc = "New Best Model !!!"
         best_val = val_meter
-        save_ckpt(model, optimizer, cfg, os.path.join(cfg['model_root'], 'best.ckpt'), epoch, best_val)
+        save_ckpt(model, optimizer, cfg, os.path.join(cfg["model_root"], "best.ckpt"),
+                  epoch, best_val)
     else:
         es = True
-        sc = 'A Relative Failure Epoch'
-                
-    logger.info('==========================================================================================================')
-    logger.info('Epoch: {:2d}    {}'.format(epoch, sc))
-    logger.info('Average Loss: {:.4f}'.format(loss_meter))
-    logger.info('R@1: {:.1f}'.format(val_meter[0]))
-    logger.info('R@5: {:.1f}'.format(val_meter[1]))
-    logger.info('R@10: {:.1f}'.format(val_meter[2]))
-    logger.info('R@100: {:.1f}'.format(val_meter[3]))
-    logger.info('Rsum: {:.1f}'.format(val_meter[4]))
-    logger.info('Best: R@1: {:.1f} R@5: {:.1f} R@10: {:.1f} R@100: {:.1f} Rsum: {:.1f}'.format(best_val[0], best_val[1], best_val[2], best_val[3], best_val[4]))
-    logger.info('==========================================================================================================')
-        
+        sc = "A Relative Failure Epoch"
+
+    logger.info("=" * 100)
+    logger.info(f"Epoch: {epoch:2d}    {sc}")
+    logger.info(f"Average Loss: {loss_meter:.4f}")
+    logger.info(f"R@1: {val_meter[0]:.1f}, R@5: {val_meter[1]:.1f}, "
+                f"R@10: {val_meter[2]:.1f}, Rsum: {val_meter[4]:.1f}")
+    logger.info(f"Best Rsum: {best_val[4]:.1f}")
+    logger.info("=" * 100)
+
     return val_meter, best_val, es
 
 
-def validation(context_dataloader, query_eval_loader, model, val_criterion, cfg, logger, resume):
-
+# ==========================================================
+def validation(context_dataloader, query_eval_loader, model,
+               val_criterion, cfg, logger, resume):
     val_meter = val_criterion(model, context_dataloader, query_eval_loader)
-    
-    logger.info('==========================================================================================================')
-    logger.info('Testing from: {}'.format(resume))
-    logger.info('R@1: {:.1f}'.format(val_meter[0]))
-    logger.info('R@5: {:.1f}'.format(val_meter[1]))
-    logger.info('R@10: {:.1f}'.format(val_meter[2]))
-    logger.info('R@100: {:.1f}'.format(val_meter[3]))
-    logger.info('Rsum: {:.1f}'.format(val_meter[4]))
-    logger.info('==========================================================================================================')
+    logger.info("=" * 100)
+    logger.info(f"Testing from: {resume}")
+    logger.info(f"R@1: {val_meter[0]:.1f}, R@5: {val_meter[1]:.1f}, "
+                f"R@10: {val_meter[2]:.1f}, Rsum: {val_meter[4]:.1f}")
+    logger.info("=" * 100)
 
 
+# ==========================================================
 def main():
     cfg = get_configs(args.dataset_name)
+    logger = set_log(cfg["model_root"], "log.txt")
+    logger.info(f"Uneven Event Modeling: {cfg['dataset_name']}")
 
-    # set logging
-    logger = set_log(cfg['model_root'], 'log.txt')
-    logger.info('Uneven Event Modeling: {}'.format(cfg['dataset_name']))
+    set_seed(cfg["seed"])
+    logger.info(f"set seed: {cfg['seed']}")
 
-    # set seed
-    set_seed(cfg['seed'])
-    logger.info('set seed: {}'.format(cfg['seed']))
-
-    # hyper parameter
+    # 🔧 Thiết lập GPU
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-    device_ids = range(torch.cuda.device_count())
-    if args.gpu and torch.cuda.is_available():
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-        device = torch.device("cuda")
-    else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"used gpu: {args.gpu}")
 
-    logger.info('used gpu: {}'.format(args.gpu))
+    # 📦 Dataset
+    logger.info("Loading Data ......")
+    cfg, train_loader, context_dataloader, query_eval_loader, \
+        test_context_dataloader, test_query_eval_loader = get_datasets(cfg)
 
-    logger.info('Hyper Parameter ......')
-    logger.info(cfg)
+    # 🧠 Model
+    logger.info("Loading Model ......")
+    model = get_models(cfg).to(device)
 
-    # dataset
-    logger.info('Loading Data ......')
-    cfg, train_loader, context_dataloader, query_eval_loader, test_context_dataloader, test_query_eval_loader = get_datasets(cfg)
-
-    # model
-    logger.info('Loading Model ......') 
-    model = get_models(cfg)
-
-    # initial
-    current_epoch = -1
-    es_cnt = 0
-    best_val = [0., 0., 0., 0., 0.]
-    if args.resume != '':
-        logger.info('Resume from {}'.format(args.resume))
-        _, model_state_dict, optimizer_state_dict, current_epoch, best_val = load_ckpt(args.resume)
-        model.load_state_dict(model_state_dict)
-    model = model.to(device)
-
-    if len(device_ids) > 1:
-        model = nn.DataParallel(model)
-    
+    optimizer = get_opts(cfg, model, train_loader)
     criterion = get_losses(cfg)
     val_criterion = get_validations(cfg)
 
+    current_epoch, start_batch = -1, 0
+    best_val = [0., 0., 0., 0., 0.]
+    es_cnt = 0
+
+    # 🔄 Resume nếu có checkpoint
+    if os.path.exists(CHECKPOINT_PATH):
+        logger.info(f"🔄 Resume from {CHECKPOINT_PATH}")
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        current_epoch = checkpoint["epoch"]
+        start_batch = checkpoint["batch"] + 1
+    else:
+        logger.info("🚀 Starting fresh training...")
+
+    # 🧪 Evaluation mode
     if args.eval:
-        if args.resume == '':
-            logger.info('No trained ckpt load !!!') 
+        if not os.path.exists(CHECKPOINT_PATH):
+            logger.info("No trained ckpt found !!!")
         else:
             with torch.no_grad():
-                validation(test_context_dataloader, test_query_eval_loader, model, val_criterion, cfg, logger, args.resume)
+                validation(test_context_dataloader, test_query_eval_loader,
+                           model, val_criterion, cfg, logger, CHECKPOINT_PATH)
         exit(0)
 
-    optimizer = get_opts(cfg, model, train_loader)
-    if args.resume != '':
-        optimizer.load_state_dict(optimizer_state_dict)
+    # 🔁 Training loop
+    for epoch in range(current_epoch + 1, cfg["n_epoch"]):
+        loss_meter = train_one_epoch(epoch, train_loader, model, criterion,
+                                     cfg, optimizer, device)
 
-    for epoch in range(current_epoch + 1, cfg['n_epoch']):
-
-        ############## train
-        loss_meter = train_one_epoch(epoch, train_loader, model, criterion, cfg, optimizer,device=device)
-
-        ############## val
         with torch.no_grad():
-            val_meter, best_val, es = val_one_epoch(epoch, context_dataloader, query_eval_loader, model, 
-                    val_criterion, cfg, optimizer, best_val, loss_meter, logger)
+            val_meter, best_val, es = val_one_epoch(epoch, context_dataloader,
+                                                    query_eval_loader, model,
+                                                    val_criterion, cfg, optimizer,
+                                                    best_val, loss_meter, logger)
 
-        ############## early stop
         if not es:
             es_cnt = 0
         else:
             es_cnt += 1
-            if cfg['max_es_cnt'] != -1 and es_cnt > cfg['max_es_cnt']:  # early stop
-                logger.info('Early Stop !!!') 
-                exit(0)
+            if cfg["max_es_cnt"] != -1 and es_cnt > cfg["max_es_cnt"]:
+                logger.info("Early Stop !!!")
+                break
 
 
-
-if __name__ == '__main__':
+# ==========================================================
+if __name__ == "__main__":
     main()
