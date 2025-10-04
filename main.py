@@ -20,7 +20,7 @@ from Utils.utils import set_seed, set_log, gpu, save_ckpt, load_ckpt
 
 # ==========================================================
 # 📂 Đường dẫn checkpoint (sẽ lưu 1 file duy nhất)
-CHECKPOINT_PATH = "/content/drive/MyDrive/AIC2025/UEM/checkpoints/uem_latest.pt"
+CHECKPOINT_PATH = "/content/drive/MyDrive/UEM/uem_latest.pt"
 os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
 # ==========================================================
 
