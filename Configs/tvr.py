@@ -24,7 +24,7 @@ cfg['sft_factor'] = 0.09
 
 
 # dataset
-cfg['num_workers'] = 32
+cfg['num_workers'] = 2#32
 cfg['no_core_driver'] = False
 cfg['no_pin_memory'] = False
 cfg['batchsize'] = 64
@@ -38,7 +38,7 @@ cfg['margin'] = 0.1
 
 
 # train
-cfg['n_epoch'] = 100
+cfg['n_epoch'] = 1 #100
 cfg['max_es_cnt'] = 10
 cfg['hard_negative_start_epoch'] = 20
 cfg['hard_pool_size'] = 20
